@@ -24,6 +24,7 @@ I will be creating a population where each member will have the following inform
 |<img src="https://render.githubusercontent.com/render/math?math=r">|Float|Reinfection probability|0-1|
 |Quarantined|Bool|Currently Quarantined|Y,N|
 |Hospitalized|Bool|Currently Hospitalized|Y,N|
+|Ignore Quarantine|Bool|Either an essential worker or disregarding stay-at-home orders|Y,N|
 |Speed|Float|Movement speed (dependent on global quarantine level)|0-1|
 |Position|Tuple(Float, 2)|Current location|(0-1, 0-1)|
 |Mass|Float|Interaction prevention parameter|0, <img src="https://render.githubusercontent.com/render/math?math=\infinity">|
@@ -68,7 +69,7 @@ The increase and decrease of the transmission probability is not affected by any
 The disease severity curve will be a piecewise-defined function with 5 parameters.  These are:
 1. <img src="https://render.githubusercontent.com/render/math?math=t_{\S_{max}}">: The time of maximum disease severity (<img src="https://render.githubusercontent.com/render/math?math=t_{S_0}"> + 1-14 days)
 2. <img src="https://render.githubusercontent.com/render/math?math=t_{S_0}">: Time of the onset of noticable symptoms (2-14 days)
-3. <img src="https://render.githubusercontent.com/render/math?math=K_S">: How quickly symptoms manifest and become worse (arbitrarily 0.5-3)
+3. <img src="https://render.githubusercontent.com/render/math?math=K_S">: How quickly symptoms manifest and become worse (arbitrarily 0.1-2)
 4. <img src="https://render.githubusercontent.com/render/math?math=S_{max}">: The maximum theoretical disease severity for this agent (based on age alone.)
 5. <img src="https://render.githubusercontent.com/render/math?math=\gamma">: The rate of disease recovery.
 
