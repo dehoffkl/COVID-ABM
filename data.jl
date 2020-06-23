@@ -4,7 +4,6 @@ using Query
 using Dates
 using TimeSeries
 using Statistics
-using DataArrays
 
 using Plots
 

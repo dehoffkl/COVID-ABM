@@ -2,7 +2,9 @@ using Agents
 using BenchmarkTools
 using Distributions
 using AgentsPlots
+using Dates
 using Plots
+using Random
 
 """
     CovidAgent
@@ -53,25 +55,30 @@ mutable struct CovidAgent <: AbstractAgent
 end
 
 """
-   gen_β()
+   gen_β(min_Kβ, max_kβ, βmax)
 
-Generates values for βparams for an agent.  Many of these
-values are based on observed data from the pandemic.  The
-returned dictionary contains the following parameters
+    Generates values for βparams for an agent.  Many of these
+    values are based on observed data from the pandemic.  The
+    returned dictionary contains the following parameters
 
- - tβmax::Float64: Time at max contagion, 2-6 days by observed cycle
- - tβmed::Float64: Time at median contagion, halfway between 2 days and tβmax
- - Kβ::Float64: How quickly the transmission probability builds (arbitrary between 5 and 10)
- - βmax::Float64: Maximum transmission probability (Normal distribution around 0.05)
- - η::Float64: How quickly transmission probability decreases (not contagious by 11 days)
+     - tβmax::Float64: Time at max contagion, 2-6 days by observed cycle
+     - tβmed::Float64: Time at median contagion, halfway between 2 days and tβmax
+     - Kβ::Float64: How quickly the transmission probability builds (arbitrary between 5 and 10)
+     - βmax::Float64: Maximum transmission probability (Normal distribution around βmax with 0.05*βmax std dev)
+     - η::Float64: How quickly transmission probability decreases (not contagious by 11 days)
+
+    # Arguments
+     - min_Kβ:Float64: Minimum value for Kβ
+     - max_Kβ:Float64: Maximum value for Kβ
+     - βmax:Float64: Average transmission probability (in percentage)
 """
-function gen_β()
+function gen_β(min_Kβ=5, max_kβ=10, βmax=75)
     βparams = Dict() 
     #Looking for a tight distribution around 5% (± 2%)
     βparams["tβmax"] = rand(Uniform(2, 6))
     βparams["tβmed"] = 2. + (βparams["tβmax"] - 2.)/2.
-    βparams["Kβ"] = rand(Uniform(5, 10))
-    βparams["βmax"] = rand(Normal(75, 2/3.))/100
+    βparams["Kβ"] = rand(Uniform(min_Kβ, max_kβ))
+    βparams["βmax"] = rand(Normal(βmax, (βmax*0.05)))/100
     βparams["η"] = βparams["βmax"] / (11-βparams["tβmax"])
     return βparams
 end
@@ -79,13 +86,13 @@ end
 """
    gen_S(age)
 
-Generates values for Sparams for an agent.  Most of these values are arbitrary
+    Generates values for Sparams for an agent.  Most of these values are arbitrary
 
- - tSmax::Float64: Time at max severity, 1-14 days after onset of symptoms
- - tS0::Float64: Time at onset of symptoms, 2-14 days after infection
- - KS::Float64: How quickly the severity builds (arbitrary between 0.1 and 2)
- - Smax::Float64: Maximum severity (limited normal around logistic function)
- - γ::Float64: How quickly severity decreases (linear recovery)
+    - tSmax::Float64: Time at max severity, 1-14 days after onset of symptoms
+    - tS0::Float64: Time at onset of symptoms, 2-14 days after infection
+    - KS::Float64: How quickly the severity builds (arbitrary between 0.1 and 2)
+    - Smax::Float64: Maximum severity (limited normal around logistic function)
+    - γ::Float64: How quickly severity decreases (linear recovery)
 """
 function gen_S(age)
     Sparams = Dict()
@@ -104,27 +111,32 @@ function gen_S(age)
     return Sparams
 end
 
+function dayFrac(p)
+    return convert(Float64, convert(Dates.Millisecond, p) / convert(Dates.Millisecond, Day(1)))
+end
+
 """
     initialize([extents, speed, mask_perc, ageRange, percInfected,
          percIgnore, dt, initial_qlevel, interaction_radius,
          detection_threshold, critical_threshold)
 
-Initialize the ABM.  Creates the model space and the agents
+    Initialize the ABM.  Creates the model space and the agents
 
-# Arguments
-- extents:NTuple{2, Float64}: Dimensions of the model space
-- N:Int64: Number of agent in the model
-- speed:Float64: Absolute speed of agents
-- mask_perc:Float64: Percentage of agents that use mask
-- ageRange:NTuple{2, Int64}: Range of ages for agents
-- percInfected:Float64: Initial percentage of infected agents
-- percIgnore:Float64: Percentage of agents ignoring stay-at-home orders
-- dt:Float64: Model time step (in days)
-- initial_qlevel:Int64: Initial stay-at-home order level (0 = maximum, 4 = fully open)
-- interaction_radius:Float64: How close two agents need to be in order to potentially transmit
-- detection_threshold:Float64: Threshold for detecting infection
-- critical_threshold:Float64: Threshold for being considered seriously ill
-- reinfect_prob:Float64: Maximum probability for reinfection
+    # Arguments
+    - extents:NTuple{2, Float64}: Dimensions of the model space
+    - N:Int64: Number of agent in the model
+    - speed:Float64: Absolute speed of agents
+    - mask_perc:Float64: Percentage of agents that use mask
+    - ageRange:NTuple{2, Int64}: Range of ages for agents
+    - percInfected:Float64: Initial percentage of infected agents
+    - percIgnore:Float64: Percentage of agents ignoring stay-at-home orders
+    - dt:Float64: Model time step (in days)
+    - initial_qlevel:Int64: Initial stay-at-home order level (0 = maximum, 4 = fully open)
+    - interaction_radius:Float64: How close two agents need to be in order to potentially transmit
+    - detection_threshold:Float64: Threshold for detecting infection
+    - critical_threshold:Float64: Threshold for being considered seriously ill
+    - reinfect_prob:Float64: Maximum probability for reinfection
+    - init_date:Date: Initial date for model
 """
 function initialize(; extents=(10,10),
     N = 500,
@@ -133,23 +145,37 @@ function initialize(; extents=(10,10),
     ageRange = (10, 90),
     percInfected = 0.1,
     percIgnore = 0.2,
-    dt = 1.0,
+    dt = Dates.Day(1),
     initial_qlevel = 0,
     interaction_radius = 2,
     detection_threshold = 10,
     critical_threshold = 75,
-    reinfect_prob = 0.05
+    reinfect_prob = 0.05,
+    init_date = Date(2020, 03, 01),
+    Kβ_min = 5,
+    Kβ_max = 10,
+    βmax = 75,
+    mask_effect = 0.67,
+    rseed=-1
     )
 
+    if rseed > 0
+        Random.seed!(rseed)
+    end
     properties = Dict(
-        :dt => dt,
+        :dt => dayFrac(dt),
         :qlevel => initial_qlevel,
         :radius => interaction_radius,
         :Sdetect => detection_threshold,
         :Scrit => critical_threshold,
         :speed => speed,
         :reinf => reinfect_prob,
-        :tick => 0
+        :tick => convert(DateTime, init_date),
+        :Kβ_min => Kβ_min,
+        :Kβ_max => Kβ_max,
+        :βmax => βmax,
+        :mask_effect => mask_effect,
+        :tick_delt => dt,
     )
 
     space2d = ContinuousSpace(2; periodic=true, extend=extents)
@@ -176,7 +202,7 @@ function initialize(; extents=(10,10),
             0, #time since entered recovery status
             mask, #whether mask is used
             0, #current transmission probability
-            gen_β(), #transmission probability params
+            gen_β(Kβ_min, Kβ_max, βmax), #transmission probability params
             gen_S(age), #severity parameters
             0.01, #reinfection probability
             false, #quarantined
@@ -200,19 +226,19 @@ check to see if the agent is infected and quarantined, hospitalized, or passed.
 """
 function agent_step!(agent, model)
     move_agent!(agent, model, model.dt)
-    update!(agent, model)
+    update_agent!(agent, model)
     check_status!(agent, model)
 end
 
 """
-    update!(a, m)
+    update_agent!(a, m)
 
 This function will update an agent.  If the agent is infected, it will
 calculate the transmission probability and severity at the new time step.
 If the severity drops below 0, then the agent is considered recovered (:R)
 immediately
 """
-function update!(a, m)
+function update_agent!(a, m)
     if a.status == :I
         a.infect_t += m.dt
 
@@ -257,7 +283,7 @@ function update!(a, m)
     elseif a.status == :R
         a.recover_t += m.dt
         if a.r < m.reinf
-            a.r += m.dt * rand(Normal(m.reinf/100., m.reinf/600.))
+            a.r += m.dt * rand(Normal(m.reinf, m.reinf/6.))
         end
     end
 end
@@ -324,11 +350,11 @@ function reset_agent!(a, m)
     a.hospitalized = false
     a.mass = a.ignore_quarantine ? 1.0 : Inf
     a.ignore_quarantine ? a.vel = calc_speed(m.speed) : a.vel = (0.0, 0.0) 
-    βparams = gen_β()
+    βparams = gen_β(m.Kβ_min, m.Kβ_max, m.βmax)
 end
 
 """
-    transmit!(a1, a2)
+    transmit!(a1, a2, m)
 
 This function checks for transmission between two agents.  It first checks that
 only one of a1, a2 are infected.  Then it adjusts the β (probability of transmission)
@@ -337,7 +363,7 @@ it uses the transmission probability β from the infected individual.  If the
 healty party has the :R status, then it uses the reinfection probability r from
 the healthy individual 
 """
-function transmit!(a1, a2)
+function transmit!(a1, a2, m)
     # for transmission, only 1 can have the disease (otherwise nothing happens)
     count(a.status == :I for a in (a1, a2)) ≠ 1 && return
     infected, healthy = a1.status == :I ? (a1, a2) : (a2, a1)
@@ -347,8 +373,8 @@ function transmit!(a1, a2)
         actual_β = healthy.r
     end
 
-    healthy.mask ? actual_β *= 0.67 : actual_β = actual_β
-    infected.mask ? actual_β *= 0.67 : actual_β = actual_β
+    healthy.mask ? actual_β *= m.mask_effect : actual_β = actual_β
+    infected.mask ? actual_β *= m.mask_effect : actual_β = actual_β
 
     rand() > actual_β && return
 
@@ -429,24 +455,27 @@ speed and direction of interacting agents through elastic collisions.
 function model_step!(model)
     r = model.radius
     for (a1, a2) in interacting_pairs(model, r, :nearest)
-        transmit!(a1, a2)
+        transmit!(a1, a2, model)
         elastic_collision!(a1, a2, :mass)
     end
 
-    if model.tick == 21*24
+    if model.tick == Dates.DateTime(2020, 3, 26)
+        model.qlevel = 0
+        change_quarantine!(model)
+    elseif model.tick == Dates.DateTime(2020, 5, 4)
         model.qlevel = 1
         change_quarantine!(model)
-    elseif model.tick == 42*24
+    elseif model.tick == Dates.DateTime(2020, 6, 5)
         model.qlevel = 2
         change_quarantine!(model)
-    elseif model.tick == 64*24
+    elseif model.tick == Dates.DateTime(2020, 6, 19)
         model.qlevel = 3
         change_quarantine!(model)
-    elseif model.tick == 86*24
+    elseif model.tick == Dates.DateTime(2020, 7, 5)
         model.qlevel = 4
         change_quarantine!(model)
     end
 
-    model.tick += 1
+    model.tick += model.tick_delt
 end
 
