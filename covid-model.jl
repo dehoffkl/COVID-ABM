@@ -1,9 +1,7 @@
 using Agents
 using BenchmarkTools
 using Distributions
-using AgentsPlots
 using Dates
-using Plots
 using Random
 
 """
@@ -72,12 +70,16 @@ end
      - max_Kβ:Float64: Maximum value for Kβ
      - βmax:Float64: Average transmission probability (in percentage)
 """
-function gen_β(min_Kβ=5, max_kβ=10, βmax=75)
+function gen_β(Sparams, min_Kβ=5, max_kβ=10, βmax=75)
+    lb = min_Kβ < max_kβ ? min_Kβ : max_kβ;
+    ub = min_Kβ > max_kβ ? min_Kβ : max_kβ;
+    ub = min_Kβ == max_kβ ? max_kβ : max_kβ + 1;
     βparams = Dict() 
     #Looking for a tight distribution around 5% (± 2%)
-    βparams["tβmax"] = rand(Uniform(2, 6))
+    test = Sparams["tS0"] - rand(Uniform(1., 3.))
+    βparams["tβmax"] = test > 0.0 ? test : 0.0
     βparams["tβmed"] = 2. + (βparams["tβmax"] - 2.)/2.
-    βparams["Kβ"] = rand(Uniform(min_Kβ, max_kβ))
+    βparams["Kβ"] = rand(Uniform(lb, ub))
     βparams["βmax"] = rand(Normal(βmax, (βmax*0.05)))/100
     βparams["η"] = βparams["βmax"] / (11-βparams["tβmax"])
     return βparams
@@ -192,7 +194,8 @@ function initialize(; extents=(10,10),
         ignore = rand() < percIgnore
         mass = ignore ? 1.0 : Inf
         vel = ignore ? calc_speed(speed) : (0.0, 0.0)
-        βparams = gen_β()
+        Sparams = gen_S(age)
+        βparams = gen_β(Sparams, Kβ_min, Kβ_max, βmax)
         add_agent!(model, 
             age, #agent age
             sym, #current infection status
@@ -202,8 +205,8 @@ function initialize(; extents=(10,10),
             0, #time since entered recovery status
             mask, #whether mask is used
             0, #current transmission probability
-            gen_β(Kβ_min, Kβ_max, βmax), #transmission probability params
-            gen_S(age), #severity parameters
+            βparams, #severity parameters
+            Sparams, #transmission probability params
             0.01, #reinfection probability
             false, #quarantined
             false, #hospitalized
@@ -349,8 +352,9 @@ function reset_agent!(a, m)
     a.quarantined = false
     a.hospitalized = false
     a.mass = a.ignore_quarantine ? 1.0 : Inf
-    a.ignore_quarantine ? a.vel = calc_speed(m.speed) : a.vel = (0.0, 0.0) 
-    βparams = gen_β(m.Kβ_min, m.Kβ_max, m.βmax)
+    a.ignore_quarantine ? a.vel = calc_speed(m.speed) : a.vel = (0.0, 0.0)
+    a.Sparams = gen_S(a.age)
+    a.βparams = gen_β(a.Sparams, m.Kβ_min, m.Kβ_max, m.βmax)
 end
 
 """
@@ -405,7 +409,15 @@ agents to 100% of model speed.  At level 4, we release all agents that are
 not specifically quarantined or hospitalized to full speed
 """
 function change_quarantine!(model)
-    if model.qlevel == 1
+    if model.qlevel == 0
+        for a in allagents(model)
+            if !a.ignore_quarantine
+                a.vel = (0,0)
+                a.mass = Inf
+            end
+        end
+
+    elseif model.qlevel == 1
         for a in allagents(model)
             if a.age < 70
                 if !(a.quarantined || a.hospitalized) && !a.ignore_quarantine
@@ -434,11 +446,9 @@ function change_quarantine!(model)
         end
     elseif model.qlevel == 4
         for a in allagents(model)
-            if a.age >= 70
-                if !(a.quarantined || a.hospitalized) && !a.ignore_quarantine
-                    a.vel = calc_speed(model.speed)
-                    a.mass = 1.0 
-                end
+            if !(a.quarantined || a.hospitalized) && !a.ignore_quarantine
+                a.vel = calc_speed(model.speed)
+                a.mass = 1.0 
             end
         end
     end

@@ -1,11 +1,14 @@
 using Distributed
-@everywhere using ProgressMeter
 
 procs = addprocs(5)
 
 @everywhere using CSV, DataFrames, Query
 @everywhere using Statistics, Dates, TimeSeries
-@everywhere using BlackBoxOptim
+@everywhere using Distributions
+@everywhere using ProgressMeter
+@everywhere using GLMNet
+
+
 
 """
     get_data(file, county)
@@ -43,25 +46,10 @@ procs = addprocs(5)
         :hosp=>tot_hosp, :mortality=>mort) 
 end
 
-@everywhere function calcRMSE(truth, vals)
-    return sqrt(mean( (truth .- vals).^2 ))
-end
-
 #get the targets (Orange county values)
 @everywhere case_data = get_data("Florida COVID Case Line 20200602.csv", "Orange")
 
 @everywhere include("covid-model.jl")
-
-"""
-ext = (1,1);
-N = 1000;
-dt = Dates.Hour(1);
-speed = 0.02;
-percIgnore = 0.5;
-int_rad = 0.012;
-detect_thresh = 20;
-steps = 2400;
-"""
 
 @everywhere function run_model(params; rseed=-1)
     steps = 2400;
@@ -158,7 +146,7 @@ steps = 2400;
     max_case_dt = maximum(case_data[:ts].timestamp)
     data_agg = filter(row->row[:date] <= max_case_dt, data_agg)
 
-    mod_scale = case_data[:cases] / sum(data_agg.detect)
+    #mod_scale = case_data[:cases] / sum(data_agg.detect)
 
     modeled = data_agg;
     #modeled[!,:detect] .*= mod_scale;
@@ -169,15 +157,47 @@ steps = 2400;
 end
 
 @everywhere function evaluate(params)
+    id = popfirst!(params)
+    test = run_model(params)
 
-    modeled = run_model(params, rseed=42)
+    return(format_output(test, id=id))
+end
 
-    detect_err = calcRMSE(case_data[:ts].detected, modeled.detect)
-    hosp_err = calcRMSE(case_data[:ts].hosp_cases, modeled.hosp)
-    death_err = calcRMSE(case_data[:ts].deaths, modeled.deaths)
+@everywhere function format_output(test; id=-1.)
+    test2 = test[!, [:date, :detect, :hosp, :deaths]];
+    test2[!, :detect] = Float64.(coalesce(test2[!, :detect],0))
+    test2[!, :hosp] = Float64.(coalesce(test2[!, :hosp],0))
+    test2[!, :deaths] = Float64.(coalesce(test2[!, :deaths],0))
+    test2[!, :detectxhosp] = test2[!,:detect] .* test[!,:hosp];
+    test2[!, :detectxdeaths] = test2[!,:detect] .* test[!,:deaths];
+    test2[!, :hospxdeaths] = test2[!,:hosp] .* test[!,:deaths];
+    test2[!, :detect_hosp] = test2[!,:detect] .+ test[!,:hosp];
+    test2[!, :detect_deaths] = test2[!,:detect] .+ test[!,:deaths];
+    test2[!, :hosp_deaths] = test2[!,:hosp] .+ test[!,:deaths];
+    test2 = stack(test2, Not(:date))
+    test2[!, :variable] = Dates.format.(test2[!, :date], "yyyy-mm-dd") .* "_" .* test2[!, :variable]
+    test2[!, :id] .= id;
+    for i in 1:nrow(test2)
+        test2[i, :value] += rand(Normal(0, 0.01))
+    end
+    test2 = select!(test2, Not(:date));
 
-    return detect_err + 10.0*hosp_err + 20.0*death_err
-end;
+    test2 = unstack(test2, :id, :variable, :value)
+    return disallowmissing(test2)
+end
+
+#Set limits on ABM parameters
+RandExtent = Uniform(0.5, 5);
+RandSpeed = Uniform(0.0001, 5.0);
+RandPerc = Uniform(0.0, 1.0);
+RandRad = Uniform(1.e-10, 1.0);
+RandDetect = Uniform(5.0, 50.0);
+RandCrit = Uniform(25.0, 95.0);
+RandInf = Uniform(1.0e-10, 0.25);
+RandReinf = Uniform(1.0e-10, 0.50);
+RandKβ_min = Uniform(1.0, 7.0);
+RandKβ_max = Uniform(3.0, 10.0);
+Randβ_max = Uniform(20.0, 100.0);
 
 """
 params: extent, 
@@ -188,35 +208,99 @@ mask_effect, mask_perc,
 reinfect_prob, Kβ_min,
 Kβ_max, βmax
 """
-setup = bbsetup(evaluate;
-    SearchRange = [ (0.5, 5.), 
-        (0.0001, 5.), (0.0, 1.0), 
-        (1.0E-10, 1.0), (5., 50.),
-        (1.0E-10, 0.25), (25., 95.),
-        (0.0, 1.0), (0.0, 1.0),
-        (1E-10, 0.5), (1., 7.,), 
-        (3., 10.), (20., 100.)],
-    Method=:dxnes,
-    MaxTime=28800,
-    Workers=workers()
-);
+input = [rand(RandExtent), rand(RandExtent), rand(RandSpeed),
+    rand(RandPerc), rand(RandRad), rand(RandDetect),
+    rand(RandInf), rand(RandCrit), rand(RandPerc),
+    rand(RandPerc), rand(RandReinf), rand(RandKβ_min),
+    rand(RandKβ_max), rand(Randβ_max)];
 
-res = bboptimize(setup)
 
-n = 50
-bp = best_candidate(res)
-best_params = []
+n = 1000
+plist = []
 for i in 1:n
-    push!(best_params, bp)
+    push!(plist, [i, rand(RandExtent), rand(RandSpeed),
+    rand(RandPerc), rand(RandRad), rand(RandDetect),
+    rand(RandInf), rand(RandCrit), rand(RandPerc),
+    rand(RandPerc), rand(RandReinf), rand(RandKβ_min),
+    rand(RandKβ_max), rand(Randβ_max)])
 end
 
-f = open("bboptim-fitted.txt", "w")
-for i in bp
+param_frame = DataFrame(Matrix(DataFrame(plist))')
+names!(param_frame, [:id, :ext, :speed, :percIgnore, :int_rad, :det_thresh, :percInit, :crit_thresh,
+                      :mask_eff, :mask_perc, :reinf_prob, :Kβ_min, :Kβ_max, :β_max])
+
+CSV.write("inputs.csv", param_frame)
+
+bunched = @showprogress pmap(x->evaluate(x), plist);
+output = DataFrame()
+for i in 1:length(bunched)
+    append!(output, bunched[i]);
+end
+CSV.write("simulations.csv", output)
+
+y = param_frame[!, :crit_thresh]
+X = disallowmissing(output[!, Not(:id)])
+
+models = Dict()
+for i in 2:ncol(param_frame)
+    println("Fitting ", names(param_frame)[i])
+    y = param_frame[!, i]
+    cv = glmnetcv(Matrix(X), y, alpha=0.8, parallel=true)
+    models[names(param_frame)[i]] = Dict("beta"=>cv.path.betas[:,argmin(cv.meanloss)],
+                                        "int"=>cv.path.a0[argmin(cv.meanloss)])
+end
+
+cd = DataFrame(case_data[:ts]);
+names!(cd, [:date, :detect, :hosp, :deaths])
+exist = Matrix(format_output(cd)[!, Not(:id)])
+
+"""
+params: extent, 
+speed, percIgnore, 
+interaction_radius, detection_threshold,
+percInfected, critical_threshold,
+mask_effect, mask_perc,
+reinfect_prob, Kβ_min,
+Kβ_max, βmax
+"""
+fitted = [
+    models["ext"]["int"] + (exist*models["ext"]["beta"])[1],
+    models["speed"]["int"] + (exist*models["speed"]["beta"])[1],
+    models["percIgnore"]["int"] + (exist*models["percIgnore"]["beta"])[1],
+    models["int_rad"]["int"] + (exist*models["int_rad"]["beta"])[1],
+    models["det_thresh"]["int"] + (exist*models["det_thresh"]["beta"])[1],
+    models["percInit"]["int"] + (exist*models["percInit"]["beta"])[1],
+    models["crit_thresh"]["int"] + (exist*models["crit_thresh"]["beta"])[1],
+    models["mask_eff"]["int"] + (exist*models["mask_eff"]["beta"])[1],
+    models["mask_perc"]["int"] + (exist*models["mask_perc"]["beta"])[1],
+    models["reinf_prob"]["int"] + (exist*models["reinf_prob"]["beta"])[1],
+    models["Kβ_min"]["int"] + (exist*models["Kβ_min"]["beta"])[1],
+    models["Kβ_max"]["int"] + (exist*models["Kβ_max"]["beta"])[1],
+    models["β_max"]["int"] + (exist*models["β_max"]["beta"])[1]
+]
+
+for i in 1:length(fitted)
+    if fitted[i] < 0.0
+        i == 6 ? fitted[i] = 0.001 : fitted[i] = 0.0
+    end
+end
+
+f = open("linear-fitted.txt", "w")
+for i in fitted
     println(f, i)
 end
 close(f)
 
-bunched = @showprogress pmap(x->run_model(x), best_params)
+fitted = readdlm("linear-fitted.txt", '\n')
+
+
+n = 50
+test_params = []
+for i in 1:n
+    push!(test_params, fitted)
+end
+
+bunched = @showprogress pmap(x->run_model(x), test_params)
 
 test = DataFrame()
 for i in 1:length(bunched)
@@ -227,11 +311,4 @@ result[!, :detect_z] = 1.96.*result[:,:detect_std]./sqrt.(result[:,:nrow])
 result[!, :hosp_z] = 1.96.*result[:,:hosp_std]./sqrt.(result[:,:nrow])
 result[!, :deaths_z] = 1.96.*result[:,:deaths_std]./sqrt.(result[:,:nrow])
 
-CSV.write("bboptim-fitted_runs.csv", result)
-
-
-
-modeled = run_model(best_candidate(res))
-best_candidate(res)
-#evaluate([1,1,0.02,0.5,0.012,20])
-run_model([1,1,0.02,0.5,0.012,20,0.01,40,0.5,0.3,0.001,5,10,75], rseed=42)
+CSV.write("fitted_runs.csv", result)
